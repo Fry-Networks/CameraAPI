@@ -6,6 +6,8 @@ const metadataSchema = new mongoose.Schema({
 
 const RtspLinkSchema = new mongoose.Schema({
   rtspUrl: { type: String, required: true },
+  minerKey: { type: String },
+  walletAddress: { type: String },
   metadata: metadataSchema,
 }, { timestamps: true });
 

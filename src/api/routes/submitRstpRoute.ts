@@ -5,7 +5,7 @@ import { checkRtspLink } from '../../service/checkRtspLink.js';
 const router = express.Router();
 
 router.post('/api/validateRtsp', async (req, res) => {
-  const { rtspUrl } = req.body;
+  const { rtspUrl,minerKey,address } = req.body;
 
   if (!rtspUrl) {
     return res.status(400).json({
@@ -14,13 +14,24 @@ router.post('/api/validateRtsp', async (req, res) => {
     });
   }
 
+  const existingKey = await RtspLink.exists({ rtspUrl: rtspUrl });
+
+    if (existingKey) {
+      console.log("existingKey:", existingKey);
+      return res.status(409).send({
+        message: "RTSP URL already exists in database.",
+        status: "ERROR"
+      });
+    }
+
   try {
     const isValid = await checkRtspLink(rtspUrl);
 
     if (isValid) {
-
       const rtspLink = new RtspLink({
         rtspUrl,
+        minerKey,
+        walletAddress: address,
         metadata: {
           data_type: "rstp",
         }
