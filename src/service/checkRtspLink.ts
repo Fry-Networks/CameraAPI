@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import * as net from 'net';
 import * as url from 'url';
+import { promises as dns } from 'dns';
 
 function generateDigestResponse(username: string, password: string, realm: string, nonce: string, uri: string): string {
     const ha1 = crypto.createHash('md5').update(`${username}:${realm}:${password}`).digest('hex');
@@ -8,8 +9,50 @@ function generateDigestResponse(username: string, password: string, realm: strin
     return crypto.createHash('md5').update(`${ha1}:${nonce}:${ha2}`).digest('hex');
 }
 
+// Blocks connections to private/loopback/link-local/reserved network ranges so a
+// submitted rtspUrl can't be used to make this server probe or reach our own
+// internal infrastructure (SSRF). Legitimate cameras are reachable on the public
+// internet (via a public IP or DDNS hostname), so this doesn't affect them.
+function isDisallowedIp(ip: string): boolean {
+    if (net.isIPv4(ip)) {
+        const parts = ip.split('.').map(Number);
+        const [a, b] = parts;
+        if (a === 10) return true; // 10.0.0.0/8
+        if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+        if (a === 192 && b === 168) return true; // 192.168.0.0/16
+        if (a === 127) return true; // loopback
+        if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
+        if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64.0.0/10
+        if (a === 0) return true; // "this" network
+        if (a >= 224) return true; // multicast + reserved 224.0.0.0/4, 240.0.0.0/4
+        return false;
+    }
+    if (net.isIPv6(ip)) {
+        const lower = ip.toLowerCase();
+        if (lower === '::1') return true; // loopback
+        if (lower.startsWith('fe80:') || lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true; // link-local
+        if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // unique local (fc00::/7)
+        const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+        if (mapped) return isDisallowedIp(mapped[1]); // IPv4-mapped IPv6
+        return false;
+    }
+    return true; // unrecognized format - fail closed
+}
+
+async function assertPublicHost(host: string): Promise<void> {
+    const results = await dns.lookup(host, { all: true });
+    if (results.length === 0) {
+        throw new Error('Could not resolve RTSP host.');
+    }
+    for (const { address } of results) {
+        if (isDisallowedIp(address)) {
+            throw new Error('RTSP host resolves to a private/reserved network address.');
+        }
+    }
+}
+
 export function checkRtspLink(rtspUrl: string): Promise<boolean> {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
 
         const parsedUrl = url.parse(rtspUrl);
 
@@ -25,6 +68,13 @@ export function checkRtspLink(rtspUrl: string): Promise<boolean> {
 
         const host = parsedUrl.hostname;
         const port = parsedUrl.port ? parseInt(parsedUrl.port, 10) : 554;
+
+        try {
+            await assertPublicHost(host);
+        } catch (err) {
+            reject(err);
+            return;
+        }
 
         const auth = parsedUrl.auth ? parsedUrl.auth.split(':') : [];
         const username = auth[0] || '';
